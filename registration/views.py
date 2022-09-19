@@ -1,5 +1,6 @@
 from django.http import JsonResponse
 from .models import Saloon
+from booking.models import Booking
 from rest_framework.decorators import action, permission_classes
 from rest_framework import permissions, serializers
 from rest_framework.authtoken.models import Token
@@ -8,6 +9,9 @@ from .serializers import RegisterSerializer
 from django.contrib.auth import authenticate
 from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth.models import User, Group
+from dateutil.relativedelta import relativedelta
+from datetime import datetime
+from django.db.models import Sum, Count
 
 class RegistrationViewSet(viewsets.ModelViewSet):
 	serializer_class = RegisterSerializer
@@ -75,5 +79,30 @@ class SaloonViewSet(viewsets.ModelViewSet):
 			for schdule in data['schdules']:
 				saloon.add_schdule(schdule)
 			return JsonResponse({"status":"success"})
+		else:
+			return JsonResponse({"status":"failed","msg":"you dont have access for this saloon"})
+
+	@action(detail=True, methods=["get"],permission_classes=[IsAuthenticated])
+	def get_revenue_details(self, request, pk=None, *args, **kwargs):
+		token = request.headers.get('Authorization').split()[1]
+		user = Token.objects.get(key=token).user
+		saloon = Saloon.objects.get(id=pk)
+		if user.id == saloon.owner_id:
+			data = {}
+			start_date = datetime.today() - relativedelta(months=1)
+			end_date = datetime.today()
+			bookings = Booking.objects.filter(saloon_id=saloon.id,booking_date__gte=start_date,booking_date__lte=end_date)
+			cancelled_bookings = bookings.filter(is_cancelled=True)
+			completed_bookings = bookings.filter(is_cancelled=False)
+			booking_data = list(completed_bookings.values('service__name').annotate(price=Sum('price'), count=Count('id')))
+			data["revenue"] = sum(service['price'] for service in booking_data)
+			data["total_services"] = sum(service['count'] for service in booking_data)
+			data["services"] = booking_data
+			data["revenue_loss"] = 0
+			for cb in cancelled_bookings:
+				bookings_at_cancelled_slot = Booking.objects.filter(booking_date=cb.booking_date,start_time__lte=cb.start_time,end_time__gte=cb.end_time,is_cancelled=False).count()
+				if saloon.no_of_sheets > bookings_at_cancelled_slot:
+					data["revenue_loss"] += cb.price
+			return JsonResponse(data)
 		else:
 			return JsonResponse({"status":"failed","msg":"you dont have access for this saloon"})
